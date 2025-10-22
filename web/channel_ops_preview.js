@@ -131,10 +131,10 @@ const EXT_NAME = "Channel_Ops.Preview";
       const raw = wid ? (wid.value ?? '') : '';
       const nodeIdOk = (typeof node.id === 'number' && node.id >= 0) ? String(node.id) : '';
       const userPid = String(raw || '').replace(/[^a-zA-Z0-9_-]/g, "_");
+      // Strictly use per-node identifiers to avoid cross-node preview bleed; no global 'A' fallback
       const candidates = Array.from(new Set([
-        nodeIdOk || undefined,
         userPid || undefined,
-        'A'
+        nodeIdOk || undefined
       ].filter(Boolean)));
   const ts = (typeof tsOverride === 'number' && isFinite(tsOverride)) ? tsOverride : Date.now();
       let ci = 0;
@@ -158,8 +158,9 @@ const EXT_NAME = "Channel_Ops.Preview";
       // Try candidates by fetching as blob with no-store, then set object URL
       while(ci < candidates.length){
         if(token !== state.loadToken) return;
-        // Prefer new project path Channel_Ops, fall back to ChannelOps (keeps preview working before you move/rename the folder)
+        // Prefer current project path ComfyUI_Channel_Ops, then Channel_Ops, then legacy ChannelOps (backward compatibility)
         const tryPaths = [
+          `/extensions/ComfyUI_Channel_Ops/channel_ops_preview_${candidates[ci]}.png?ts=${ts}`,
           `/extensions/Channel_Ops/channel_ops_preview_${candidates[ci]}.png?ts=${ts}`,
           `/extensions/ChannelOps/channel_ops_preview_${candidates[ci]}.png?ts=${ts}`
         ];
@@ -510,11 +511,16 @@ const EXT_NAME = "Channel_Ops.Preview";
         // hide widget completely
         w.computeSize = () => [0,0];
         w.draw = () => {};
-        w.value = String(node.id ?? '0');
-        if(Array.isArray(node.widgets_values)){
-          const idx = node.widgets ? node.widgets.indexOf(w) : -1;
-          if(idx >= 0) node.widgets_values[idx] = w.value;
-        }
+        const setVal = (val) => {
+          try{ w.value = String(val ?? ''); }catch(_){}
+          if(Array.isArray(node.widgets_values)){
+            const idx = node.widgets ? node.widgets.indexOf(w) : -1;
+            if(idx >= 0) node.widgets_values[idx] = w.value;
+          }
+        };
+        // Set immediately and re-sync shortly after creation to catch late id assignment
+        setVal(node.id);
+        setTimeout(() => setVal(node.id), 0);
       }
     } catch(e) { console.warn(`[${EXT_NAME}] preview_id widget setup failed`, e); }
 
@@ -558,11 +564,13 @@ app.registerExtension({
             try{
               // Ensure behavior attached
               if(!n._channelOpsPreviewAdded){ ensureBehavior(n); }
-              // Match by preview_id widget value
+              // Match by preview_id widget value OR by node.id to avoid cross-node updates
               let w = null;
               if(n.widgets){ w = n.widgets.find(w => (w && (w.name === 'preview_id' || w.label === 'preview_id'))); }
               const widVal = w ? String(w.value ?? '') : '';
-              if(widVal && widVal === pid){
+              const nodeIdOk = (typeof n.id === 'number' && n.id >= 0) ? String(n.id) : '';
+              const matches = (widVal && widVal === pid) || (nodeIdOk && nodeIdOk === pid);
+              if(matches){
                 if(n._channelOpsLoadBaseReset) n._channelOpsLoadBaseReset();
                 if(n._channelOpsLoadBaseWithRetry) n._channelOpsLoadBaseWithRetry(ts);
                 else if(n._channelOpsLoadBase) n._channelOpsLoadBase(ts);
