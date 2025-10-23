@@ -235,6 +235,19 @@ def apply_channel_ops(
             _, th, tw, _ = rgb.shape
             src_rgb = _resize_hw(src_rgb, (th, tw))
 
+        # Fast-path: group-to-group overwrite (RGB->RGB, HSV->HSV, OKLAB->OKLAB)
+        if s == "RGB" and d == "RGB":
+            rgb = src_rgb.clone()
+            return torch.clamp(rgb, 0.0, 1.0)
+        if s == "HSV" and d == "HSV":
+            hsv_src = rgb_to_hsv(src_rgb)
+            rgb = hsv_to_rgb(hsv_src)
+            return torch.clamp(rgb, 0.0, 1.0)
+        if s == "OKLAB" and d == "OKLAB":
+            lab_src = rgb_to_oklab(src_rgb)
+            rgb = oklab_to_rgb(lab_src)
+            return torch.clamp(rgb, 0.0, 1.0)
+
         sval = None
         if s in ("R", "G", "B"):
             idx = {"R": 0, "G": 1, "B": 2}[s]
@@ -260,6 +273,26 @@ def apply_channel_ops(
             idx = {"H": 0, "S": 1, "V": 2}[d]
             hsv[..., idx:idx+1] = torch.clamp(sval, 0.0, 1.0)
             rgb = hsv_to_rgb(hsv)
+        elif d == "RGB":
+            # Set all RGB channels to the scalar value (grayscale overwrite)
+            sval3 = torch.cat([sval, sval, sval], dim=-1)
+            rgb = torch.clamp(sval3, 0.0, 1.0)
+        elif d == "HSV":
+            # Set all HSV channels from the scalar; hue wraps, s and v clamp
+            h = torch.remainder(sval, 1.0)
+            s2 = torch.clamp(sval, 0.0, 1.0)
+            v2 = torch.clamp(sval, 0.0, 1.0)
+            hsv = torch.cat([h, s2, v2], dim=-1)
+            rgb = hsv_to_rgb(hsv)
+        elif d == "OKLAB":
+            # Set Oklab L directly; a and b via normalization [-0.4,0.4]
+            L = torch.clamp(sval, 0.0, 1.0)
+            an = torch.clamp(sval, 0.0, 1.0)
+            bn = torch.clamp(sval, 0.0, 1.0)
+            a2 = an * 0.8 - 0.4
+            b2 = bn * 0.8 - 0.4
+            lab = torch.cat([L, a2, b2], dim=-1)
+            rgb = oklab_to_rgb(lab)
 
     else:
         amount_raw = float(amount_255)
@@ -374,7 +407,8 @@ class ChannelOpsNode:
                 ], {"default": "RGB"}),
                 "Destination": ([
                     "Red", "Green", "Blue",
-                    "Hue", "Saturation", "Value"
+                    "Hue", "Saturation", "Value",
+                    "RGB", "HSV", "Oklab"
                 ], {"default": "Red"}),
             },
             "optional": {

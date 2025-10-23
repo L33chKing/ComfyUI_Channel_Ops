@@ -497,11 +497,23 @@ const EXT_NAME = "Channel_Ops.Preview";
           const D = dst.toLowerCase();
           let rr=r, gg=g, bb=b;
           // Compute scalar source value in [0,1]
-          let sval = 0;
           let sr = r, sg = g, sb = b;
           if(op === 'overwrite_from_image' && srcData){
             sr = srcData[i] / 255; sg = srcData[i+1] / 255; sb = srcData[i+2] / 255;
           }
+          // Fast path: group-to-group overwrite should copy full vector (parity with backend)
+          if((S==='rgb' && D==='rgb')){
+            return [sr, sg, sb];
+          } else if((S==='hsv' && D==='hsv')){
+            const [h,s,v] = rgb2hsv(sr,sg,sb);
+            const rgb = hsv2rgb(h,s,v);
+            return [rgb[0], rgb[1], rgb[2]];
+          } else if((S==='oklab' && D==='oklab')){
+            const [L,A,B_] = rgb2oklab(sr,sg,sb);
+            const rgb = oklab2rgb(L,A,B_);
+            return [rgb[0], rgb[1], rgb[2]];
+          }
+          let sval = 0;
           if(S==='red' || S==='green' || S==='blue'){
             sval = (S==='red') ? sr : (S==='green' ? sg : sb);
           } else if(S==='hue' || S==='saturation' || S==='value' || S==='hsv'){
@@ -528,6 +540,25 @@ const EXT_NAME = "Channel_Ops.Preview";
             else if(D==='saturation') s = sval;
             else v = sval;
             const rgb = hsv2rgb(h,s,v);
+            return [rgb[0], rgb[1], rgb[2]];
+          } else if(D==='rgb'){
+            // Grayscale overwrite by scalar
+            return [sval, sval, sval];
+          } else if(D==='hsv'){
+            // Set all HSV components from scalar; hue wraps [0,1), s and v clamp
+            let h = sval - Math.floor(sval); // wrap
+            let s2 = Math.max(0, Math.min(1, sval));
+            let v2 = Math.max(0, Math.min(1, sval));
+            const rgb = hsv2rgb(h, s2, v2);
+            return [rgb[0], rgb[1], rgb[2]];
+          } else if(D==='oklab'){
+            // Set Oklab L directly; a and b via normalization [-0.4,0.4]
+            const L = Math.max(0, Math.min(1, sval));
+            const an = Math.max(0, Math.min(1, sval));
+            const bn = Math.max(0, Math.min(1, sval));
+            const a2 = an * 0.8 - 0.4;
+            const b2 = bn * 0.8 - 0.4;
+            const rgb = oklab2rgb(L, a2, b2);
             return [rgb[0], rgb[1], rgb[2]];
           }
           // If destination unsupported, return unchanged
