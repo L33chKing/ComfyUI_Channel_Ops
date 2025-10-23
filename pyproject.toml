@@ -28,7 +28,7 @@ Documentation = "https://github.com/L33chKing/ComfyUI_Channel_Ops/wiki"
 "Bug Tracker" = "https://github.com/L33chKing/ComfyUI_Channel_Ops/issues"
 
 [tool.comfy]
-PublisherId = ""
+PublisherId = "leechking"
 DisplayName = "ComfyUI_Channel_Ops"
 Icon = ""
 includes = [] 
