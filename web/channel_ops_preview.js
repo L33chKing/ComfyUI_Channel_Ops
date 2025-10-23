@@ -41,7 +41,7 @@ const EXT_NAME = "Channel_Ops.Preview";
       return Math.max(y, minTop + 6);
     }
 
-    const safeTop = widgetsBottomY(node) + 12; // extra padding below widgets
+    const safeTop = widgetsBottomY(node) + 18; // extra padding below widgets
     const availableH = Math.max(0, h - safeTop - pad);
     // Fill the remaining height to make the preview scale with node size
     const desiredH = Math.max(24, availableH);
@@ -363,9 +363,52 @@ const EXT_NAME = "Channel_Ops.Preview";
       return w.value;
     }
 
+    // --- UI helpers: attach tooltips ---
+    function setTooltip(widget, text){
+      if(!widget) return;
+      widget.tooltip = text;
+      widget.description = text; // some builds use description for hover
+    }
+
+    function applyTooltips(){
+      const wOp = getWidget('operation');
+      const wSrc = getWidget('Source');
+      const wDst = getWidget('Destination');
+      const wAmt = getWidget('amount');
+
+      setTooltip(wOp,
+        'Operations:\n'+
+        '• Invert: Flip selected channel(s); Hue wraps.\n'+
+        '• Overwrite: Copy Source into Destination (cross-space allowed).\n'+
+        '• Overwrite from Image: Same as Overwrite but from second image input.\n'+
+        '• Set/Add/Sub/Mult/Div: Arithmetic on Source channel(s). Mult/Div use raw factor.\n'+
+        '• Clamp Min/Max: Clamp Source channel(s).\n'+
+        '• Truncate: Snap to step size (1-amount).\n'+
+        '• Contrast: Piecewise contrast around 0.5 (a/b normalized in Oklab).'
+      );
+      setTooltip(wSrc,
+        'Sources:\n'+
+        '• RGB: all three RGB channels.\n'+
+        '• Red/Green/Blue: single RGB channel.\n'+
+        '• HSV / Hue/Saturation/Value: operate in HSV; Hue wraps on arithmetic.\n'+
+        '• Oklab: L,a,b in perceptual space; a/b normalized to ±0.4 for some ops.'
+      );
+      setTooltip(wDst,
+        'Destinations (used by Overwrite):\n'+
+        '• R/G/B or H/S/V: write scalar to that component.\n'+
+        '• RGB/HSV/Oklab: if Source matches, copy full vector; otherwise map scalar.'
+      );
+      setTooltip(wAmt,
+        'Amount: 0–255.\n'+
+        '• For Set/Add/Sub: normalized (x/255).\n'+
+        '• Multiply/Divide: raw factor (2 = 2×, 255 = 255×).\n'+
+        '• Truncate/Contrast: interpreted as 1 - (x/255).'
+      );
+    }
+
     function renderEffect(){
       if(!state.baseLoaded) return;
-      const op = (getValue('operation') || '').toString().toLowerCase().replace(/\s+/g,'_');
+  const op = (getValue('operation') || '').toString().toLowerCase().replace(/\s+/g,'_');
       const src = (getValue('Source') || '').toString();
       const dst = (getValue('Destination') || '').toString();
       const amount255 = parseFloat(getValue('amount') || 0) || 0;
@@ -689,6 +732,7 @@ const EXT_NAME = "Channel_Ops.Preview";
   node._channelOpsLoadSrcWithRetry = loadSrcWithRetry;
 
   bindChanges();
+  applyTooltips();
   loadBase();
   // Opportunistically try to load a secondary source preview if present
   loadSrc();
