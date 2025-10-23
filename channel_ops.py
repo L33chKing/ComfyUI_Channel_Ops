@@ -1,5 +1,6 @@
 import os
 import time
+from typing import Optional, Tuple
 import torch
 import numpy as np
 
@@ -139,12 +140,38 @@ def _apply_op(x: torch.Tensor, op: str, amount: float) -> torch.Tensor:
     return x
 
 
+def _resize_hw(x: torch.Tensor, new_hw: Tuple[int, int]) -> torch.Tensor:
+    """Resize image tensor [B,H,W,C] to new (H,W) with bilinear sampling."""
+    if x.ndim != 4 or x.shape[-1] != 3:
+        return x
+    b, h, w, c = x.shape
+    nh, nw = new_hw
+    if h == nh and w == nw:
+        return x
+    xc = x.permute(0, 3, 1, 2)  # B,C,H,W
+    xr = torch.nn.functional.interpolate(xc, size=(nh, nw), mode="bilinear", align_corners=False)
+    return xr.permute(0, 2, 3, 1)
+
+
+def _align_batches(a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Align batch dimension by slicing to min B."""
+    if a.ndim != 4 or b.ndim != 4:
+        return a, b
+    ba = a.shape[0]
+    bb = b.shape[0]
+    if ba == bb:
+        return a, b
+    m = min(ba, bb)
+    return a[:m], b[:m]
+
+
 def apply_channel_ops(
     image: torch.Tensor,
     operation: str,
     source: str,
     dest: str,
     amount_255: float,
+    source_image: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Apply channel operations over RGB/HSV/OKLAB.
 
@@ -195,24 +222,35 @@ def apply_channel_ops(
             lab = torch.cat([L, a_i, b_i], dim=-1)
             rgb = oklab_to_rgb(lab)
 
-    elif op == "overwrite":
+    elif op == "overwrite" or op == "overwrite_from_image":
+        # For overwrite_from_image, take source value from source_image if provided;
+        # otherwise behave like normal overwrite.
         rgb = rgb.clone()
+        src_rgb = rgb
+        if op == "overwrite_from_image" and source_image is not None:
+            # Align batch and spatial dims
+            src_rgb = source_image
+            src_rgb, rgb = _align_batches(src_rgb, rgb)
+            # Ensure src spatial matches dest
+            _, th, tw, _ = rgb.shape
+            src_rgb = _resize_hw(src_rgb, (th, tw))
+
         sval = None
         if s in ("R", "G", "B"):
             idx = {"R": 0, "G": 1, "B": 2}[s]
-            sval = rgb[..., idx:idx+1]
+            sval = src_rgb[..., idx:idx+1]
         elif s in ("H", "S", "V") or s == "HSV":
-            hsv = rgb_to_hsv(rgb)
+            hsv = rgb_to_hsv(src_rgb)
             if s == "HSV":
                 sval = hsv[..., 0:1]
             else:
                 idx = {"H": 0, "S": 1, "V": 2}[s]
                 sval = hsv[..., idx:idx+1]
         elif s == "OKLAB":
-            lab = rgb_to_oklab(rgb)
+            lab = rgb_to_oklab(src_rgb)
             sval = lab[..., 0:1]
         else:
-            sval = rgb[..., 0:1]
+            sval = src_rgb[..., 0:1]
 
         if d in ("R", "G", "B"):
             idx = {"R": 0, "G": 1, "B": 2}[d]
@@ -318,6 +356,7 @@ class ChannelOpsNode:
                 "operation": ([
                     "Invert",
                     "Overwrite",
+                    "Overwrite from Image",
                     "Set",
                     "Add",
                     "Subtract",
@@ -339,6 +378,7 @@ class ChannelOpsNode:
                 ], {"default": "Red"}),
             },
             "optional": {
+                "image_b": ("IMAGE",),
                 "amount": ("INT", {"default": 0, "min": 0, "max": 255, "step": 1}),
                 "preview_id": ("STRING", {"default": "A"}),
             }
@@ -349,13 +389,17 @@ class ChannelOpsNode:
     FUNCTION = "run"
     CATEGORY = "image/processing"
 
-    def run(self, image, operation, Source, Destination, amount=0, preview_id: str = "A"):
-        out = apply_channel_ops(image, operation, Source, Destination, amount)
+    def run(self, image, operation, Source, Destination, amount=0, preview_id: str = "A", image_b=None):
+        out = apply_channel_ops(image, operation, Source, Destination, amount, source_image=image_b)
         this_dir = os.path.dirname(os.path.abspath(__file__))
         web_dir = os.path.join(this_dir, "web")
         safe_id = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in (preview_id or 'A'))
         filename = f"channel_ops_preview_{safe_id}.png"
         _save_web_preview(image, web_dir, filename=filename, max_dim=512)
+        # Save secondary preview if provided (used for overwrite-from-image in frontend)
+        if image_b is not None:
+            filename_src = f"channel_ops_preview_src_{safe_id}.png"
+            _save_web_preview(image_b, web_dir, filename=filename_src, max_dim=512)
         try:
             from server import PromptServer  # type: ignore
             payload = {

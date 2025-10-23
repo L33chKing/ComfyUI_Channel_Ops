@@ -12,6 +12,7 @@ Note: Destination parameter has no effect on any operations other than Overwrite
 |-----------|--------|
 | Invert    | Inverts selected channel(s). |
 | Overwrite | Overwrites destination channel with source channel. |
+| Overwrite from Image | Overwrites destination channel using the selected channel taken from the optional second image input. Falls back to Overwrite when no second image is provided. |
 | Set       | Sets selected channel(s) to Amount. |
 | Add       | Adds Amount. |
 | Subtract  | Subtracts Amount. |
