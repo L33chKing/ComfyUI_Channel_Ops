@@ -444,6 +444,12 @@ const EXT_NAME = "Channel_Ops.Preview";
 
   function clamp01(x){ return Math.min(1, Math.max(0, x)); }
   function wrap01(x){ x = x % 1; return x < 0 ? x + 1 : x; }
+      // Combined-RGB-source helper. Maps "red+green" etc. to channel indices.
+      const RGB_COMBO_IDX = {
+        'red+green': [0, 1],
+        'red+blue':  [0, 2],
+        'green+blue':[1, 2],
+      };
       function rgb2hsv(r,g,b){
         const max = Math.max(r,g,b), min = Math.min(r,g,b);
         const v = max;
@@ -515,6 +521,11 @@ const EXT_NAME = "Channel_Ops.Preview";
             return [1-r, 1-g, 1-b];
           }else if(S === 'red' || S==='green' || S==='blue'){
             return [S==='red'?1-r:r, S==='green'?1-g:g, S==='blue'?1-b:b];
+          }else if(RGB_COMBO_IDX[S]){
+            const idxs = RGB_COMBO_IDX[S];
+            const ch = [r, g, b];
+            for(const i of idxs) ch[i] = 1 - ch[i];
+            return ch;
           }else if(S === 'hue' || S==='saturation' || S==='value' || S==='hsv'){
             const hsv = rgb2hsv(r,g,b);
             if(S==='hsv'){
@@ -559,6 +570,11 @@ const EXT_NAME = "Channel_Ops.Preview";
           let sval = 0;
           if(S==='red' || S==='green' || S==='blue'){
             sval = (S==='red') ? sr : (S==='green' ? sg : sb);
+          } else if(RGB_COMBO_IDX[S]){
+            // Mean of the two selected RGB channels (matches Python).
+            const idxs = RGB_COMBO_IDX[S];
+            const ch = [sr, sg, sb];
+            sval = (ch[idxs[0]] + ch[idxs[1]]) * 0.5;
           } else if(S==='hue' || S==='saturation' || S==='value' || S==='hsv'){
             const [h,s,v] = rgb2hsv(sr,sg,sb);
             sval = (S==='hsv') ? h : (S==='hue' ? h : (S==='saturation' ? s : v));
@@ -577,6 +593,12 @@ const EXT_NAME = "Channel_Ops.Preview";
             else if(D==='green') gg = sval;
             else bb = sval;
             return [rr,gg,bb];
+          } else if(RGB_COMBO_IDX[D]){
+            // Write scalar source value to each selected RGB channel.
+            const idxs = RGB_COMBO_IDX[D];
+            const ch = [rr, gg, bb];
+            for(const i of idxs) ch[i] = sval;
+            return ch;
           } else if(D==='hue' || D==='saturation' || D==='value'){
             let [h,s,v] = rgb2hsv(rr,gg,bb);
             if(D==='hue') h = sval; // backend clamps rather than wrapping
@@ -640,6 +662,11 @@ const EXT_NAME = "Channel_Ops.Preview";
           if(S==='red') rr = clamp01(applyScalarRaw(rr));
           if(S==='green') gg = clamp01(applyScalarRaw(gg));
           if(S==='blue') bb = clamp01(applyScalarRaw(bb));
+        } else if(RGB_COMBO_IDX[S]){
+          const idxs = RGB_COMBO_IDX[S];
+          const ch = [rr, gg, bb];
+          for(const i of idxs) ch[i] = clamp01(applyScalarRaw(ch[i]));
+          rr = ch[0]; gg = ch[1]; bb = ch[2];
         } else if(S==='hue' || S==='saturation' || S==='value' || S==='hsv'){
           let [h,s,v] = rgb2hsv(rr,gg,bb);
           if(S==='hsv'){
@@ -731,6 +758,18 @@ const EXT_NAME = "Channel_Ops.Preview";
   node._channelOpsLoadSrc = loadSrc;
   node._channelOpsLoadSrcWithRetry = loadSrcWithRetry;
 
+  // Replace underscores with spaces in the visible widget label.
+  try{
+    if(node.widgets){
+      for(const w of node.widgets){
+        if(!w || !w.name) continue;
+        if(w.name === 'preview_id') continue;
+        if(w.label && w.label !== w.name) continue;
+        if(w.name.indexOf('_') < 0) continue;
+        w.label = w.name.replace(/_/g, ' ');
+      }
+    }
+  }catch(_e){}
   bindChanges();
   applyTooltips();
   loadBase();

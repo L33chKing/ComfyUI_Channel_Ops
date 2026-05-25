@@ -153,6 +153,44 @@ def _resize_hw(x: torch.Tensor, new_hw: Tuple[int, int]) -> torch.Tensor:
     return xr.permute(0, 2, 3, 1)
 
 
+def apply_mask_blend(orig: torch.Tensor, processed: torch.Tensor, mask) -> torch.Tensor:
+    """Composite `processed` over `orig` where the mask is non-zero. mask is
+    a ComfyUI MASK tensor: shape [H,W], [B,H,W], or [B,1,H,W], values in [0,1].
+    It is auto-resized to match the image's spatial dimensions and broadcast
+    over the batch dimension.
+
+    Returns `processed` unchanged if mask is None or not a tensor.
+    """
+    if mask is None or not torch.is_tensor(mask):
+        return processed
+    m = mask
+    if m.dim() == 2:
+        m = m.unsqueeze(0)              # [H,W] -> [1,H,W]
+    elif m.dim() == 4:
+        # [B,1,H,W] -> [B,H,W] (channel-first) or [B,H,W,1] -> [B,H,W]
+        if m.shape[1] == 1:
+            m = m.squeeze(1)
+        elif m.shape[-1] == 1:
+            m = m.squeeze(-1)
+        else:
+            m = m[:, 0]  # fallback: take first channel
+    # Resize spatially if needed.
+    th, tw = int(orig.shape[1]), int(orig.shape[2])
+    if int(m.shape[-2]) != th or int(m.shape[-1]) != tw:
+        m4 = m.unsqueeze(1)             # [B,1,H,W]
+        m4 = torch.nn.functional.interpolate(m4, size=(th, tw), mode="bilinear", align_corners=False)
+        m = m4.squeeze(1)
+    # Broadcast batch.
+    if m.shape[0] != orig.shape[0]:
+        if m.shape[0] == 1:
+            m = m.expand(orig.shape[0], -1, -1)
+        else:
+            n = min(m.shape[0], orig.shape[0])
+            m = m[:n]
+    m = m.to(dtype=orig.dtype, device=orig.device).clamp(0.0, 1.0).unsqueeze(-1)  # [B,H,W,1]
+    return orig * (1.0 - m) + processed * m
+
+
 def _align_batches(a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Align batch dimension by slicing to min B."""
     if a.ndim != 4 or b.ndim != 4:
@@ -172,6 +210,7 @@ def apply_channel_ops(
     dest: str,
     amount_255: float,
     source_image: Optional[torch.Tensor] = None,
+    mask=None,
 ) -> torch.Tensor:
     """Apply channel operations over RGB/HSV/OKLAB.
 
@@ -189,12 +228,17 @@ def apply_channel_ops(
     # Normalize full-name channels to internal short codes
     name_map = {
         "RED": "R", "GREEN": "G", "BLUE": "B",
+        "RED+GREEN": "R+G", "RED+BLUE": "R+B", "GREEN+BLUE": "G+B",
         "HUE": "H", "SATURATION": "S", "VALUE": "V",
         "RGB": "RGB", "HSV": "HSV",
         "OKLAB": "OKLAB",
     }
     s = name_map.get(source.upper(), source.upper())
     d = name_map.get(dest.upper(), dest.upper())
+    # Combined RGB channel groups. For per-channel ops (invert/add/etc.) the op
+    # is applied to each selected channel. For overwrite, the scalar source is
+    # the mean of the selected channels.
+    RGB_COMBO = {"R+G": [0, 1], "R+B": [0, 2], "G+B": [1, 2]}
 
     if op == "invert":
         if s == "RGB":
@@ -203,6 +247,10 @@ def apply_channel_ops(
             idx = {"R": 0, "G": 1, "B": 2}[s]
             rgb = rgb.clone()
             rgb[..., idx] = 1.0 - rgb[..., idx]
+        elif s in RGB_COMBO:
+            rgb = rgb.clone()
+            for idx in RGB_COMBO[s]:
+                rgb[..., idx] = 1.0 - rgb[..., idx]
         elif s in ("H", "S", "V", "HSV"):
             hsv = rgb_to_hsv(rgb)
             if s == "HSV":
@@ -252,6 +300,10 @@ def apply_channel_ops(
         if s in ("R", "G", "B"):
             idx = {"R": 0, "G": 1, "B": 2}[s]
             sval = src_rgb[..., idx:idx+1]
+        elif s in RGB_COMBO:
+            # Use the mean of the two selected RGB channels as the scalar source.
+            idxs = RGB_COMBO[s]
+            sval = (src_rgb[..., idxs[0]:idxs[0]+1] + src_rgb[..., idxs[1]:idxs[1]+1]) * 0.5
         elif s in ("H", "S", "V") or s == "HSV":
             hsv = rgb_to_hsv(src_rgb)
             if s == "HSV":
@@ -268,6 +320,11 @@ def apply_channel_ops(
         if d in ("R", "G", "B"):
             idx = {"R": 0, "G": 1, "B": 2}[d]
             rgb[..., idx:idx+1] = torch.clamp(sval, 0.0, 1.0)
+        elif d in RGB_COMBO:
+            # Write the scalar source value to each selected RGB channel.
+            sval_clamped = torch.clamp(sval, 0.0, 1.0)
+            for idx in RGB_COMBO[d]:
+                rgb[..., idx:idx+1] = sval_clamped
         elif d in ("H", "S", "V"):
             hsv = rgb_to_hsv(rgb)
             idx = {"H": 0, "S": 1, "V": 2}[d]
@@ -313,6 +370,10 @@ def apply_channel_ops(
                 idx = {"R": 0, "G": 1, "B": 2}[s]
                 rgb = rgb.clone()
                 rgb[..., idx] = torch.clamp(_apply_op(rgb[..., idx], op, amt_eff), 0.0, 1.0)
+            elif s in RGB_COMBO:
+                rgb = rgb.clone()
+                for idx in RGB_COMBO[s]:
+                    rgb[..., idx] = torch.clamp(_apply_op(rgb[..., idx], op, amt_eff), 0.0, 1.0)
             elif s in ("H", "S", "V", "HSV"):
                 hsv = rgb_to_hsv(rgb)
                 if s == "HSV":
@@ -342,6 +403,10 @@ def apply_channel_ops(
                 lab = torch.stack([L, a2, b2], dim=-1)
                 rgb = oklab_to_rgb(lab)
 
+    # If a mask was provided, restrict the effect to that region: pixels with
+    # mask=0 keep the original, mask=1 fully take the operation result.
+    if mask is not None:
+        rgb = apply_mask_blend(image, rgb, mask)
     return rgb
 
 
@@ -402,11 +467,13 @@ class ChannelOpsNode:
                 ], {"default": "Invert"}),
                 "Source": ([
                     "Red", "Green", "Blue",
+                    "Red+Green", "Red+Blue", "Green+Blue",
                     "Hue", "Saturation", "Value",
                     "RGB", "HSV", "Oklab"
                 ], {"default": "RGB"}),
                 "Destination": ([
                     "Red", "Green", "Blue",
+                    "Red+Green", "Red+Blue", "Green+Blue",
                     "Hue", "Saturation", "Value",
                     "RGB", "HSV", "Oklab"
                 ], {"default": "Red"}),
@@ -414,6 +481,7 @@ class ChannelOpsNode:
             "optional": {
                 "image_b": ("IMAGE",),
                 "amount": ("INT", {"default": 0, "min": 0, "max": 255, "step": 1}),
+                "mask": ("MASK",),
                 "preview_id": ("STRING", {"default": "A"}),
             }
         }
@@ -423,8 +491,8 @@ class ChannelOpsNode:
     FUNCTION = "run"
     CATEGORY = "image/processing"
 
-    def run(self, image, operation, Source, Destination, amount=0, preview_id: str = "A", image_b=None):
-        out = apply_channel_ops(image, operation, Source, Destination, amount, source_image=image_b)
+    def run(self, image, operation, Source, Destination, amount=0, preview_id: str = "A", image_b=None, mask=None):
+        out = apply_channel_ops(image, operation, Source, Destination, amount, source_image=image_b, mask=mask)
         this_dir = os.path.dirname(os.path.abspath(__file__))
         web_dir = os.path.join(this_dir, "web")
         safe_id = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in (preview_id or 'A'))
