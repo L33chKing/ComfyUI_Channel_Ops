@@ -19,7 +19,11 @@ EFFECT_CHOICES = [
     "Vignette",
     "Levels",
     "Color Balance",
+    "Laplacian Sharpen",
+    "Unsharp Masking",
 ]
+
+LAPLACIAN_KERNELS = ["3x3 (4-neighbor)", "3x3 (8-neighbor)"]
 
 BLUR_MODES = ["Gaussian", "Average", "Edge Average"]
 LEVELS_CHANNELS = ["RGB", "Red", "Green", "Blue"]
@@ -367,6 +371,53 @@ def _apply_sharpen(image: torch.Tensor, amount: float, radius: int, threshold: i
     return torch.clamp(out, 0.0, 1.0)
 
 
+# ---------- laplacian sharpen ----------
+def _laplacian(image: torch.Tensor, kernel: str) -> torch.Tensor:
+    """Second-derivative (Laplacian) of each RGB channel. Uses a 4-neighbor
+    or 8-neighbor 3x3 kernel with replicate padding so edges stay stable."""
+    x = image.permute(0, 3, 1, 2).contiguous()  # B,C,H,W
+    C = x.shape[1]
+    if (kernel or "").find("4") >= 0:
+        k = torch.tensor([[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]],
+                         device=x.device, dtype=x.dtype)
+    else:
+        k = torch.tensor([[1.0, 1.0, 1.0], [1.0, -8.0, 1.0], [1.0, 1.0, 1.0]],
+                         device=x.device, dtype=x.dtype)
+    k = k.view(1, 1, 3, 3).repeat(C, 1, 1, 1)
+    x_pad = torch.nn.functional.pad(x, (1, 1, 1, 1), mode="replicate")
+    lap = torch.nn.functional.conv2d(x_pad, k, groups=C)
+    return lap.permute(0, 2, 3, 1)
+
+
+def _apply_laplacian_sharpen(image: torch.Tensor, amount: float, kernel: str) -> torch.Tensor:
+    if abs(float(amount)) < 0.001:
+        return image
+    lap = _laplacian(image, kernel)
+    # Sharpen rule g = f - k*(Laplacian f): the kernel's negative centre makes
+    # subtraction lift peaks and deepen troughs, boosting local contrast.
+    out = image - float(amount) * lap
+    return torch.clamp(out, 0.0, 1.0)
+
+
+# ---------- unsharp masking (Gaussian) ----------
+def _apply_unsharp_mask(image: torch.Tensor, amount: float, radius: int, threshold: int) -> torch.Tensor:
+    """Classic unsharp mask (https://en.wikipedia.org/wiki/Unsharp_masking):
+    sharpened = original + amount * (original - blurred), gated by a per-channel
+    threshold. `amount` is a direct multiplier (1.0 = 100%)."""
+    if abs(float(amount)) < 0.001:
+        return image
+    r = max(1, int(radius))
+    blurred = _gaussian_blur(image, r)
+    diff = image - blurred
+    thr = max(0, int(threshold))
+    if thr > 0:
+        thr_n = float(thr) / 255.0
+        keep = (diff.abs() > thr_n).to(image.dtype)
+        diff = diff * keep
+    out = image + diff * float(amount)
+    return torch.clamp(out, 0.0, 1.0)
+
+
 # ---------- pixelate / mosaic ----------
 def _apply_pixelate(image: torch.Tensor, size: int, mode: str) -> torch.Tensor:
     bsize = max(1, int(size))
@@ -634,6 +685,11 @@ def apply_image_effect(
     posterize_dither_mode: str = "None",
     vignette_center_x: int = 50,
     vignette_center_y: int = 50,
+    laplacian_amount: float = 1.0,
+    laplacian_kernel: str = "3x3 (8-neighbor)",
+    usm_amount: float = 1.0,
+    usm_radius: int = 3,
+    usm_threshold: int = 0,
     mask=None,
 ) -> torch.Tensor:
     orig = torch.clamp(image, 0.0, 1.0)
@@ -655,6 +711,10 @@ def apply_image_effect(
         )
     elif eff == "sharpen":
         processed = _apply_sharpen(orig, sharpen_amount, sharpen_radius, sharpen_threshold)
+    elif eff == "laplacian sharpen":
+        processed = _apply_laplacian_sharpen(orig, laplacian_amount, laplacian_kernel)
+    elif eff == "unsharp masking":
+        processed = _apply_unsharp_mask(orig, usm_amount, usm_radius, usm_threshold)
     elif eff == "pixelate":
         processed = _apply_pixelate(orig, pixelate_size, pixelate_mode)
     elif eff == "posterize":
@@ -795,6 +855,13 @@ class ImageEffectsNode:
                 "vignette_center_x": ("INT", {"default": 50, "min": 0, "max": 100, "step": 1}),
                 "vignette_center_y": ("INT", {"default": 50, "min": 0, "max": 100, "step": 1}),
                 "posterize_dither_mode": (POSTERIZE_DITHER_MODES, {"default": "None"}),
+                # Laplacian Sharpen.
+                "laplacian_amount": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05}),
+                "laplacian_kernel": (LAPLACIAN_KERNELS, {"default": "3x3 (8-neighbor)"}),
+                # Unsharp Masking (Gaussian). amount is a direct multiplier.
+                "usm_amount": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05}),
+                "usm_radius": ("INT", {"default": 3, "min": 1, "max": 50, "step": 1}),
+                "usm_threshold": ("INT", {"default": 0, "min": 0, "max": 255, "step": 1}),
                 "mask": ("MASK",),
                 "preview_id": ("STRING", {"default": "A"}),
             }
@@ -857,6 +924,11 @@ class ImageEffectsNode:
             vignette_center_x=int(kwargs.get("vignette_center_x", 50)),
             vignette_center_y=int(kwargs.get("vignette_center_y", 50)),
             posterize_dither_mode=str(kwargs.get("posterize_dither_mode", "None")),
+            laplacian_amount=float(kwargs.get("laplacian_amount", 1.0)),
+            laplacian_kernel=str(kwargs.get("laplacian_kernel", "3x3 (8-neighbor)")),
+            usm_amount=float(kwargs.get("usm_amount", 1.0)),
+            usm_radius=int(kwargs.get("usm_radius", 3)),
+            usm_threshold=int(kwargs.get("usm_threshold", 0)),
             mask=kwargs.get("mask"),
         )
 

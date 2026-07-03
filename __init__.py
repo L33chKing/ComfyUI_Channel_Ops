@@ -3,6 +3,7 @@ from typing import Dict, Any
 from .channel_ops import ChannelOpsNode
 from .layer_blending import LayerBlendingNode
 from .image_effects import ImageEffectsNode
+from .color_matching import ColorMatchingNode
 
 # Expose web extension directory so ComfyUI serves JS files from ./web
 WEB_DIRECTORY = "./web"
@@ -11,12 +12,14 @@ NODE_CLASS_MAPPINGS: Dict[str, Any] = {
     "ChannelOpsNode": ChannelOpsNode,
     "LayerBlendingNode": LayerBlendingNode,
     "ImageEffectsNode": ImageEffectsNode,
+    "ColorMatchingNode": ColorMatchingNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     "ChannelOpsNode": "Channel Ops (live-preview)",
     "LayerBlendingNode": "Layer Blending (live-preview)",
     "ImageEffectsNode": "Filter Ops (live-preview)",
+    "ColorMatchingNode": "Color Matching (live-preview)",
 }
 
 __all__ = [

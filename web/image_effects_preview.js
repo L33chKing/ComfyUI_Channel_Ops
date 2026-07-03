@@ -35,6 +35,8 @@ const EXT_NAME = "Image_Effects.Preview";
     'color_hue', 'color_density', 'color_preserve_highlights', 'color_wheel',
   ];
   const SHARPEN_WIDGETS = ['sharpen_amount', 'sharpen_radius', 'sharpen_threshold'];
+  const LAPLACIAN_WIDGETS = ['laplacian_amount', 'laplacian_kernel'];
+  const UNSHARP_WIDGETS = ['usm_amount', 'usm_radius', 'usm_threshold'];
   const PIXELATE_WIDGETS = ['pixelate_size', 'pixelate_mode'];
   const POSTERIZE_WIDGETS = ['posterize_levels', 'posterize_mode', 'posterize_dither_mode', 'posterize_dither'];
   const VIGNETTE_WIDGETS = [
@@ -536,6 +538,72 @@ const EXT_NAME = "Image_Effects.Preview";
     }
   }
 
+  // ---------- laplacian sharpen ----------
+  // g = f - amount * Laplacian(f), replicate-padded 3x3 kernel (4- or 8-neighbor).
+  function applyLaplacianSharpen(sR, sG, sB, w, h, params, outR, outG, outB){
+    const amount = params.amount || 0;
+    const use8 = String(params.kernel || '').indexOf('4') < 0;
+    if(Math.abs(amount) < 0.001){
+      outR.set(sR); outG.set(sG); outB.set(sB); return;
+    }
+    function plane(s, o){
+      for(let y=0; y<h; y++){
+        const ym = y > 0 ? y-1 : 0;
+        const yp = y < h-1 ? y+1 : h-1;
+        for(let x=0; x<w; x++){
+          const xm = x > 0 ? x-1 : 0;
+          const xp = x < w-1 ? x+1 : w-1;
+          const c = s[y*w + x];
+          let lap;
+          if(use8){
+            lap = s[ym*w+xm] + s[ym*w+x] + s[ym*w+xp]
+                + s[y*w+xm]              + s[y*w+xp]
+                + s[yp*w+xm] + s[yp*w+x] + s[yp*w+xp] - 8*c;
+          } else {
+            lap = s[ym*w+x] + s[y*w+xm] + s[y*w+xp] + s[yp*w+x] - 4*c;
+          }
+          let v = c - amount * lap;
+          o[y*w + x] = v < 0 ? 0 : (v > 1 ? 1 : v);
+        }
+      }
+    }
+    plane(sR, outR); plane(sG, outG); plane(sB, outB);
+  }
+
+  // ---------- unsharp masking (Gaussian) ----------
+  function applyUnsharpMask(sR, sG, sB, w, h, params, tmpPlane, outR, outG, outB){
+    const amount = params.amount || 0;
+    if(Math.abs(amount) < 0.001){
+      outR.set(sR); outG.set(sG); outB.set(sB); return;
+    }
+    const radius = Math.max(1, params.radius|0);
+    const threshold = Math.max(0, (params.threshold|0)) / 255;
+    const blurR = new Float32Array(sR.length);
+    const blurG = new Float32Array(sR.length);
+    const blurB = new Float32Array(sR.length);
+    gaussianBlurPlane(sR, tmpPlane, blurR, w, h, radius);
+    gaussianBlurPlane(sG, tmpPlane, blurG, w, h, radius);
+    gaussianBlurPlane(sB, tmpPlane, blurB, w, h, radius);
+    const N = w * h;
+    for(let p=0; p<N; p++){
+      let dr = sR[p] - blurR[p];
+      let dg = sG[p] - blurG[p];
+      let db = sB[p] - blurB[p];
+      if(threshold > 0){
+        if(Math.abs(dr) <= threshold) dr = 0;
+        if(Math.abs(dg) <= threshold) dg = 0;
+        if(Math.abs(db) <= threshold) db = 0;
+      }
+      let r = sR[p] + dr * amount;
+      let g = sG[p] + dg * amount;
+      let b = sB[p] + db * amount;
+      if(r<0)r=0; else if(r>1)r=1;
+      if(g<0)g=0; else if(g>1)g=1;
+      if(b<0)b=0; else if(b>1)b=1;
+      outR[p] = r; outG[p] = g; outB[p] = b;
+    }
+  }
+
   // ---------- pixelate / mosaic ----------
   function applyPixelate(sR, sG, sB, w, h, params, outR, outG, outB){
     const bsize = Math.max(1, params.size|0);
@@ -850,6 +918,8 @@ const EXT_NAME = "Image_Effects.Preview";
     const isHalftone = effect === 'halftone';
     const isColorFilter = effect === 'color filter';
     const isSharpen = effect === 'sharpen';
+    const isLaplacian = effect === 'laplacian sharpen';
+    const isUnsharp = effect === 'unsharp masking';
     const isPixelate = effect === 'pixelate';
     const isPosterize = effect === 'posterize';
     const isVignette = effect === 'vignette';
@@ -859,6 +929,8 @@ const EXT_NAME = "Image_Effects.Preview";
     HALFTONE_WIDGETS.forEach(n => setHidden(findWidget(node, n), !isHalftone));
     COLOR_FILTER_WIDGETS.forEach(n => setHidden(findWidget(node, n), !isColorFilter));
     SHARPEN_WIDGETS.forEach(n => setHidden(findWidget(node, n), !isSharpen));
+    LAPLACIAN_WIDGETS.forEach(n => setHidden(findWidget(node, n), !isLaplacian));
+    UNSHARP_WIDGETS.forEach(n => setHidden(findWidget(node, n), !isUnsharp));
     PIXELATE_WIDGETS.forEach(n => setHidden(findWidget(node, n), !isPixelate));
     POSTERIZE_WIDGETS.forEach(n => setHidden(findWidget(node, n), !isPosterize));
     VIGNETTE_WIDGETS.forEach(n => setHidden(findWidget(node, n), !isVignette));
@@ -1204,6 +1276,14 @@ const EXT_NAME = "Image_Effects.Preview";
         applySharpen(sR, sG, sB, w, h, params.sharpen, tmp, pR, pG, pB);
         return;
       }
+      if(effect === 'laplacian sharpen'){
+        applyLaplacianSharpen(sR, sG, sB, w, h, params.laplacian, pR, pG, pB);
+        return;
+      }
+      if(effect === 'unsharp masking'){
+        applyUnsharpMask(sR, sG, sB, w, h, params.unsharp, tmp, pR, pG, pB);
+        return;
+      }
       if(effect === 'pixelate'){
         applyPixelate(sR, sG, sB, w, h, params.pixelate, pR, pG, pB);
         return;
@@ -1309,6 +1389,15 @@ const EXT_NAME = "Image_Effects.Preview";
         radius: Math.max(1, Math.round((parseInt(getVal('sharpen_radius')) || 1) * scale)),
         threshold: parseInt(getVal('sharpen_threshold')) || 0,
       };
+      const laplacianParams = {
+        amount: parseFloat(getVal('laplacian_amount')) || 0,
+        kernel: getVal('laplacian_kernel') || '3x3 (8-neighbor)',
+      };
+      const unsharpParams = {
+        amount: parseFloat(getVal('usm_amount')) || 0,
+        radius: Math.max(1, Math.round((parseInt(getVal('usm_radius')) || 3) * scale)),
+        threshold: parseInt(getVal('usm_threshold')) || 0,
+      };
       const pixelateParams = {
         size: Math.max(1, Math.round((parseInt(getVal('pixelate_size')) || 16) * scale)),
         mode: getVal('pixelate_mode') || 'Pixelate',
@@ -1358,6 +1447,12 @@ const EXT_NAME = "Image_Effects.Preview";
       } else if(effect === 'sharpen'){
         const p = sharpenParams;
         key = 'sharpen|' + p.amount + '|' + p.radius + '|' + p.threshold;
+      } else if(effect === 'laplacian sharpen'){
+        const p = laplacianParams;
+        key = 'laplacian|' + p.amount + '|' + p.kernel;
+      } else if(effect === 'unsharp masking'){
+        const p = unsharpParams;
+        key = 'unsharp|' + p.amount + '|' + p.radius + '|' + p.threshold;
       } else if(effect === 'pixelate'){
         const p = pixelateParams;
         key = 'pixelate|' + p.size + '|' + p.mode;
@@ -1384,6 +1479,8 @@ const EXT_NAME = "Image_Effects.Preview";
           halftone: halftoneParams,
           colorFilter: colorFilterParams,
           sharpen: sharpenParams,
+          laplacian: laplacianParams,
+          unsharp: unsharpParams,
           pixelate: pixelateParams,
           posterize: posterizeParams,
           vignette: vignetteParams,
@@ -1453,6 +1550,8 @@ const EXT_NAME = "Image_Effects.Preview";
         'Halftone: dotted/lined pattern with brightness driving cell size.',
         'Color Filter: tints the image with a chosen hue.',
         'Sharpen: unsharp-mask; negative amount = soften.',
+        'Laplacian Sharpen: edge boost via the Laplacian operator (4- or 8-neighbor).',
+        'Unsharp Masking: classic Gaussian unsharp mask with amount/radius/threshold.',
         'Pixelate / Mosaic: square blocks of average color (Mosaic adds grout lines).',
         'Posterize: quantises each channel to N levels.',
         'Vignette: radial dark/light falloff toward the corners.',
@@ -1499,6 +1598,11 @@ const EXT_NAME = "Image_Effects.Preview";
         sharpen_amount: 'Sharpen strength (-200 to 200). Positive sharpens, negative softens.',
         sharpen_radius: 'Detail radius for the unsharp mask.',
         sharpen_threshold: 'Minimum local contrast for sharpening (suppresses noise).',
+        laplacian_amount: 'Laplacian sharpen strength (0-5). Higher = crisper edges, more haloing.',
+        laplacian_kernel: '4-neighbor = softer (edges only). 8-neighbor = stronger (includes diagonals).',
+        usm_amount: 'Unsharp mask strength as a multiplier (1.0 = 100%).',
+        usm_radius: 'Gaussian blur radius of the unsharp mask — larger = coarser detail enhanced.',
+        usm_threshold: 'Minimum local contrast (0-255) before sharpening is applied (suppresses noise).',
         pixelate_size: 'Block size in pixels.',
         pixelate_mode: 'Pixelate = solid blocks. Mosaic = blocks with dark grout lines.',
         posterize_levels: 'Levels per channel (2-32). Lower = more bands.',

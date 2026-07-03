@@ -2,7 +2,7 @@
 
 # ComfyUI Channel Ops (live-preview)
 
-Three custom nodes for per-channel image manipulation, layer blending, and image filters — all with in-node live preview and optional MASK input.
+Four custom nodes for per-channel image manipulation, layer blending, image filters, and color matching — all with in-node live preview and optional MASK input.
 
 ## Channel Ops
 
@@ -41,11 +41,25 @@ Adaptive widget UI — only the controls relevant to the current effect are show
 | **Halftone** | `shape` (12 patterns), `size`, `angle` + angle wheel, `contrast`, `brightness`, `inverse` — Bayer-dithered |
 | **Color Filter** | `hue`, `density`, `preserve_highlights` + HSV color wheel |
 | **Sharpen** | `amount` (negative = soften), `radius`, `threshold` |
+| **Laplacian Sharpen** | `amount`, `kernel` (3×3 4-neighbor / 8-neighbor) — edge boost via the Laplacian operator |
+| **Unsharp Masking** | `amount` (multiplier), `radius` (Gaussian), `threshold` — classic [unsharp mask](https://en.wikipedia.org/wiki/Unsharp_masking) |
 | **Pixelate** | `size`, `mode` (Pixelate / Mosaic adds grout lines) |
 | **Posterize** | `levels`, `mode` (RGB / Luminance), `dither_mode` (None / Bayer / Random / Floyd-Steinberg / Atkinson), `dither` strength |
 | **Vignette** | `amount`, `size`, `feather`, `roundness` + draggable center widget |
 | **Levels** | `channel`, in/out black/white, `gamma` + histogram widget with B/γ/W handles |
 | **Color Balance** | 3 color wheels (Shadows / Midtones / Highlights); hue = tint direction, distance = intensity |
+
+---
+
+## Color Matching (live-preview)
+
+Recolors `image` so its color statistics match a `reference` image. Two image inputs, one image output. The live preview recomputes in the browser as you switch methods.
+
+| Method | What it does |
+|---|---|
+| **LAB** *(default)* | Mean/std (Reinhard) transfer in the perceptual Oklab space |
+| **RGB** | Mean/std transfer applied directly per RGB channel |
+| **Histogram** | Per-channel cumulative-distribution (CDF) matching |
 
 ---
 
