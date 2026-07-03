@@ -31,7 +31,7 @@ Composites two images with a blend mode + opacity (0–255). Foreground bilinear
 
 ---
 
-## Filter Ops (live-preview)
+## Filter Ops
 
 Adaptive widget UI — only the controls relevant to the current effect are shown. `effect` + `blend_mode` always visible. `mask` input restricts the effect to the masked region. Custom widgets (color wheels, histogram, vignette center) mirror the underlying numeric values both ways.
 
@@ -51,9 +51,9 @@ Adaptive widget UI — only the controls relevant to the current effect are show
 
 ---
 
-## Color Matching (live-preview)
+## Color Matching
 
-Recolors `image` so its color statistics match a `reference` image. Two image inputs, one image output. The live preview recomputes in the browser as you switch methods.
+Recolors `image` so its color statistics match a `reference` image. Two image inputs, one image output.
 
 | Method | What it does |
 |---|---|
