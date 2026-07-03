@@ -7,84 +7,104 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 const EXT_NAME = "Channel_Ops.Preview";
 
+// Height (px) of the preview area added below the widgets the first time a
+// preview appears. Shared by all preview nodes for a consistent look.
+const PREVIEW_H = 256;
+
   // Draw helper using node-scoped state (called from prototype wrapper)
   function drawPreview(node, ctx){
     const state = node._channelOpsState;
     if(!state) return;
+    // Nothing rendered yet? Don't draw an empty box — keep the node clean until
+    // there's an actual preview to show.
+    const ready = state.baseLoaded && state.offscreen.width > 0 && state.offscreen.height > 0;
+    if(!ready) return;
+
     const w = node.size[0];
     const h = node.size[1];
     const pad = 11;
 
-    // Estimate where widgets end to avoid overlap
+    function widgetHeight(wg){
+      let wh = 0;
+      try{
+        if(typeof wg.computeSize === 'function'){
+          const sz = wg.computeSize(w);
+          if(Array.isArray(sz)) wh = sz[1] || 0; else if(typeof sz === 'number') wh = sz;
+        } else if(typeof wg.height === 'number'){ wh = wg.height; }
+        else { wh = 20; }
+      }catch(_){ wh = 20; }
+      return wh > 0 ? wh : 0;
+    }
     function widgetsBottomY(n){
-      const start = (n.widgets_start_y ?? n.widgetsStartY ?? 0);
-      let y = start;
+      // Prefer the real drawn positions: LiteGraph sets widget.last_y (node-local)
+      // during widget drawing, which runs immediately before onDrawForeground —
+      // far more reliable than summing heights from a possibly-unset start offset
+      // (which ignored the title bar + input/output slot rows and let the preview
+      // overlap the last widget).
+      let maxBottom = 0;
       if(Array.isArray(n.widgets)){
         for(const wg of n.widgets){
-          if(!wg) continue;
-          let wh = 0;
-          try{
-            if(typeof wg.computeSize === 'function'){
-              const sz = wg.computeSize(w);
-              if(Array.isArray(sz)) wh = sz[1] || 0; else if(typeof sz === 'number') wh = sz;
-            } else if(typeof wg.height === 'number') {
-              wh = wg.height;
-            } else {
-              wh = 24;
-            }
-          }catch(_){ wh = 24; }
-          y += (wh || 0) + 6; // include a slightly larger spacing
+          if(!wg || wg.hidden) continue;
+          if(typeof wg.last_y !== 'number' || wg.last_y <= 0) continue;
+          const b = wg.last_y + widgetHeight(wg);
+          if(b > maxBottom) maxBottom = b;
         }
       }
-      // Also ensure we are at least below the title bar
-      const minTop = 24; // typical title height
-      return Math.max(y, minTop + 6);
+      if(maxBottom > 0) return maxBottom;
+      const LG = (typeof window !== 'undefined') ? window.LiteGraph : null;
+      const titleH = (LG && LG.NODE_TITLE_HEIGHT) || 30;
+      const slotH = (LG && LG.NODE_SLOT_HEIGHT) || 20;
+      const nIn = (n.inputs && n.inputs.length) || 0;
+      const nOut = (n.outputs && n.outputs.length) || 0;
+      let y = titleH + Math.max(nIn, nOut) * slotH + 4;
+      if(Array.isArray(n.widgets)){
+        for(const wg of n.widgets){
+          if(!wg || wg.hidden) continue;
+          y += widgetHeight(wg) + 4;
+        }
+      }
+      return y;
     }
 
     const safeTop = widgetsBottomY(node) + 18; // extra padding below widgets
     const availableH = Math.max(0, h - safeTop - pad);
-    // Fill the remaining height to make the preview scale with node size
-    const desiredH = Math.max(24, availableH);
-    const dh = desiredH;
+    const dh = Math.max(24, availableH);
     const dw = Math.max(0, w - pad*2);
     const x = pad;
     const y = Math.max(safeTop, h - dh - pad);
 
     ctx.save();
-    // Background panel
     ctx.fillStyle = "#111";
     ctx.fillRect(x, y, dw, dh);
     ctx.strokeStyle = "rgba(255,255,255,0.1)";
     ctx.strokeRect(x, y, dw, dh);
 
-    if(availableH < 16){
-      // Too small to draw anything safely
-      ctx.fillStyle = "#bbb";
-      ctx.font = "11px sans-serif";
-      const msg = "Enlarge node to show preview";
-      ctx.fillText(msg, x+8, Math.max(pad+12, y+12));
-      ctx.restore();
-      return;
-    }
-
-    if(state.baseLoaded && state.offscreen.width>0 && state.offscreen.height>0){
-      const iw = state.offscreen.width;
-      const ih = state.offscreen.height;
-      const scale = Math.min(dw/iw, dh/ih);
-      const rw = Math.max(1, Math.floor(iw*scale));
-      const rh = Math.max(1, Math.floor(ih*scale));
-      const ox = x + Math.floor((dw - rw)/2);
-      const oy = y + Math.floor((dh - rh)/2);
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(state.offscreen, 0, 0, iw, ih, ox, oy, rw, rh);
-    } else {
-      ctx.fillStyle = "#bbb";
-      ctx.font = "11px sans-serif";
-      const msg = "Run node once to seed preview";
-      ctx.fillText(msg, x+12, y+Math.floor(dh/2));
-    }
+    const iw = state.offscreen.width;
+    const ih = state.offscreen.height;
+    const scale = Math.min(dw/iw, dh/ih);
+    const rw = Math.max(1, Math.floor(iw*scale));
+    const rh = Math.max(1, Math.floor(ih*scale));
+    const ox = x + Math.floor((dw - rw)/2);
+    const oy = y + Math.floor((dh - rh)/2);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(state.offscreen, 0, 0, iw, ih, ox, oy, rw, rh);
     ctx.restore();
+  }
+
+  // One-time node resize when the first preview becomes available. Fresh nodes
+  // get a sensible preview area (fixes too-small / too-large starting sizes);
+  // workflow-restored nodes keep their saved size.
+  function seedPreviewSize(node){
+    if(node._previewAutoSized) return;
+    node._previewAutoSized = true;
+    if(node._loadedFromWorkflow) return;
+    try{
+      const min = node.computeSize();
+      const w = Math.max(node.size[0], min[0] || 0);
+      node.setSize([w, (min[1] || 0) + PREVIEW_H]);
+      app.graph.setDirtyCanvas(true, true);
+    }catch(_){ }
   }
 
   function ensureBehavior(node){
@@ -710,6 +730,7 @@ const EXT_NAME = "Channel_Ops.Preview";
         // alpha unchanged
       }
       ctx.putImageData(imgData, 0, 0);
+      seedPreviewSize(node);
       app.graph.setDirtyCanvas(true,true);
     }
 
@@ -910,6 +931,13 @@ app.registerExtension({
       nodeType.prototype.onResize = function(size){
         if(origResize) try{ origResize.apply(this, arguments); }catch(e){}
         try{ app.graph.setDirtyCanvas(true,true); }catch(e){}
+      };
+      // Mark workflow-restored nodes so first-preview auto-sizing respects the
+      // saved node size instead of overriding it.
+      const origConfigure = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function(info){
+        this._loadedFromWorkflow = true;
+        if(origConfigure) try{ origConfigure.apply(this, arguments); }catch(e){}
       };
     }
   }

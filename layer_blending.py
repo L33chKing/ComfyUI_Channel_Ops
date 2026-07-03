@@ -261,8 +261,8 @@ class LayerBlendingNode:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE")
-    RETURN_NAMES = ("image", "preview_ref")
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "run"
     CATEGORY = "image/compose"
 
@@ -289,5 +289,4 @@ class LayerBlendingNode:
         except Exception:
             pass
 
-        prev_ref = _downscale_for_preview(out, max_dim=512)
-        return (out, prev_ref)
+        return (out,)

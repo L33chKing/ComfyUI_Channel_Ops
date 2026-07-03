@@ -8,7 +8,24 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 const EXT_NAME = "Image_Effects.Preview";
 
+// Height (px) of the preview area kept below the widgets once a preview exists.
+// Shared by all preview nodes for a consistent look.
+const PREVIEW_H = 256;
+
 (function(){
+  // One-time node resize when the first preview becomes available. Fresh nodes
+  // get a sensible preview area; workflow-restored nodes keep their saved size.
+  function seedPreviewSize(node){
+    if(node._previewAutoSized) return;
+    node._previewAutoSized = true;
+    if(node._loadedFromWorkflow) return;
+    try{
+      const min = node.computeSize();
+      const w = Math.max(node.size[0], min[0] || 0);
+      node.setSize([w, (min[1] || 0) + PREVIEW_H]);
+      app.graph.setDirtyCanvas(true, true);
+    }catch(_){ }
+  }
   // ---------- which widgets belong to which effect ----------
   // Old workflows may carry these effect names — they're aliased to the new
   // single "Blur" effect via blur_mode during the onConfigure migration below.
@@ -962,14 +979,28 @@ const EXT_NAME = "Image_Effects.Preview";
         w.last_y = -100000;
       }
     }
-    // Grow-to-fit only: never shrink the node when widgets change. This keeps
-    // the user's manual node size (e.g. enlarged preview area) intact while
-    // still ensuring the new widget set has enough room.
+    // Resize policy:
+    //  - No preview yet (fresh node): shrink to fit the *visible* widgets only.
+    //    ComfyUI sizes a new node to fit ALL optional widgets before we hide
+    //    them, which otherwise leaves a huge empty node. Workflow-restored
+    //    nodes are left at their saved size.
+    //  - Preview exists: grow-to-fit, reserving PREVIEW_H below the widgets so
+    //    switching to a taller effect never crushes the preview, while keeping
+    //    any larger manual size the user chose.
     try{
       const min = node.computeSize();
       const cur = node.size || [0, 0];
+      const st = node._imageEffectsState;
+      const hasPreview = !!(st && st.outReady);
       const w = Math.max(cur[0] || 0, min[0] || 0);
-      const h = Math.max(cur[1] || 0, min[1] || 0);
+      let h;
+      if(hasPreview){
+        h = Math.max(cur[1] || 0, (min[1] || 0) + PREVIEW_H);
+      } else if(!node._loadedFromWorkflow){
+        h = min[1] || 0;  // fresh, no preview → compact
+      } else {
+        h = Math.max(cur[1] || 0, min[1] || 0);  // loaded → keep saved size
+      }
       if(w !== cur[0] || h !== cur[1]) node.setSize([w, h]);
     }catch(_){ }
     app.graph.setDirtyCanvas(true, true);
@@ -979,30 +1010,54 @@ const EXT_NAME = "Image_Effects.Preview";
   function drawPreview(node, ctx){
     const state = node._imageEffectsState;
     if(!state) return;
+    // Nothing rendered yet? Don't draw an empty box.
+    if(!state.outReady) return;
     const w = node.size[0];
     const h = node.size[1];
     const pad = 11;
 
+    function widgetHeight(wg){
+      let wh = 0;
+      try{
+        if(typeof wg.computeSize === 'function'){
+          const sz = wg.computeSize(w);
+          if(Array.isArray(sz)) wh = sz[1] || 0; else if(typeof sz === 'number') wh = sz;
+        } else if(typeof wg.height === 'number'){ wh = wg.height; }
+        else { wh = 20; }
+      }catch(_){ wh = 20; }
+      return wh > 0 ? wh : 0;
+    }
     function widgetsBottomY(n){
-      const start = (n.widgets_start_y ?? n.widgetsStartY ?? 0);
-      let y = start;
+      // Prefer the real drawn positions: LiteGraph sets widget.last_y (node-local)
+      // during widget drawing, which runs immediately before onDrawForeground —
+      // far more reliable than summing heights from a possibly-unset start offset
+      // (which ignored the title bar + input/output slot rows and let the preview
+      // overlap the last widget).
+      let maxBottom = 0;
       if(Array.isArray(n.widgets)){
         for(const wg of n.widgets){
-          if(!wg) continue;
-          let wh = 0;
-          try{
-            if(typeof wg.computeSize === 'function'){
-              const sz = wg.computeSize(w);
-              if(Array.isArray(sz)) wh = sz[1] || 0; else if(typeof sz === 'number') wh = sz;
-            } else if(typeof wg.height === 'number') {
-              wh = wg.height;
-            } else { wh = 24; }
-          }catch(_){ wh = 24; }
-          y += (wh || 0) + 6;
+          if(!wg || wg.hidden) continue;
+          if(typeof wg.last_y !== 'number' || wg.last_y <= 0) continue;
+          const b = wg.last_y + widgetHeight(wg);
+          if(b > maxBottom) maxBottom = b;
         }
       }
-      const minTop = 24;
-      return Math.max(y, minTop + 6);
+      if(maxBottom > 0) return maxBottom;
+      // First-frame fallback (before any widget has been drawn): estimate from
+      // the header height + the taller of the input/output slot columns.
+      const LG = (typeof window !== 'undefined') ? window.LiteGraph : null;
+      const titleH = (LG && LG.NODE_TITLE_HEIGHT) || 30;
+      const slotH = (LG && LG.NODE_SLOT_HEIGHT) || 20;
+      const nIn = (n.inputs && n.inputs.length) || 0;
+      const nOut = (n.outputs && n.outputs.length) || 0;
+      let y = titleH + Math.max(nIn, nOut) * slotH + 4;
+      if(Array.isArray(n.widgets)){
+        for(const wg of n.widgets){
+          if(!wg || wg.hidden) continue;
+          y += widgetHeight(wg) + 4;
+        }
+      }
+      return y;
     }
 
     const safeTop = widgetsBottomY(node) + 18;
@@ -1018,14 +1073,6 @@ const EXT_NAME = "Image_Effects.Preview";
     ctx.strokeStyle = "rgba(255,255,255,0.1)";
     ctx.strokeRect(x, y, dw, dh);
 
-    if(!state.outReady){
-      ctx.fillStyle = "#bbb";
-      ctx.font = "11px sans-serif";
-      const msg = state.busy ? "Computing..." : "Run node once to seed preview";
-      ctx.fillText(msg, x+12, y+Math.floor(dh/2));
-      ctx.restore();
-      return;
-    }
     const iw = state.outCanvas.width, ih = state.outCanvas.height;
     const scale = Math.min(dw/iw, dh/ih);
     const rw = Math.max(1, Math.floor(iw*scale));
@@ -1520,7 +1567,11 @@ const EXT_NAME = "Image_Effects.Preview";
         od[i+3] = 255;
       }
       state.outCtx.putImageData(state.outImageData, 0, 0);
+      const wasReady = state.outReady;
       state.outReady = true;
+      // First preview: seed a preview area, then re-sync so the reserved
+      // PREVIEW_H space is applied for the current effect's widget set.
+      if(!wasReady){ seedPreviewSize(node); try{ syncWidgets(node); }catch(_){ } }
       app.graph.setDirtyCanvas(true,true);
     }
 
@@ -2598,6 +2649,7 @@ const EXT_NAME = "Image_Effects.Preview";
         // Re-sync widget visibility after a workflow has finished loading.
         const origConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function(info){
+          this._loadedFromWorkflow = true;
           if(origConfigure) try{ origConfigure.apply(this, arguments); }catch(_e){}
           const self = this;
           // Defer to next tick so widgets_values have been applied to widget.value first.

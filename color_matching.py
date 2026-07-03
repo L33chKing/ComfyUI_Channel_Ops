@@ -13,6 +13,12 @@ from .layer_blending import _save_web_preview
 # distribution to the reference.
 COLOR_MATCH_METHODS = ["LAB", "RGB", "Histogram"]
 
+# Which perceptual component of the matched result to keep (rest comes from the
+# original). The split is always done in Oklab so it behaves the same for every
+# method: "Lightness" copies the reference tonality but keeps the original
+# colors; "Color" copies the reference grade but keeps the original tonality.
+COLOR_MATCH_TARGETS = ["All", "Lightness", "Color"]
+
 
 def _match_mean_std(src: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     """Reinhard-style statistics transfer: rescale each channel of `src` so its
@@ -67,15 +73,33 @@ def color_match_histogram(image: torch.Tensor, reference: torch.Tensor) -> torch
     return torch.from_numpy(out).to(device=dev, dtype=dt).clamp(0.0, 1.0)
 
 
-def apply_color_match(image: torch.Tensor, reference: torch.Tensor, method: str = "LAB") -> torch.Tensor:
+def _apply_target(original: torch.Tensor, matched: torch.Tensor, target: str) -> torch.Tensor:
+    """Keep only the requested Oklab component of `matched`, filling the rest
+    from `original`. `All` returns the full match unchanged."""
+    t = (target or "All").strip().lower()
+    if t == "all":
+        return matched
+    orig_lab = rgb_to_oklab(original)
+    match_lab = rgb_to_oklab(matched)
+    if t == "lightness":
+        out_lab = torch.stack([match_lab[..., 0], orig_lab[..., 1], orig_lab[..., 2]], dim=-1)
+    else:  # "color"
+        out_lab = torch.stack([orig_lab[..., 0], match_lab[..., 1], match_lab[..., 2]], dim=-1)
+    return oklab_to_rgb(out_lab)
+
+
+def apply_color_match(image: torch.Tensor, reference: torch.Tensor,
+                      method: str = "LAB", target: str = "All") -> torch.Tensor:
     image = torch.clamp(image, 0.0, 1.0)
     reference = torch.clamp(reference, 0.0, 1.0)
     m = (method or "LAB").strip().lower()
     if m == "rgb":
-        return color_match_rgb(image, reference)
-    if m == "histogram":
-        return color_match_histogram(image, reference)
-    return color_match_lab(image, reference)
+        matched = color_match_rgb(image, reference)
+    elif m == "histogram":
+        matched = color_match_histogram(image, reference)
+    else:
+        matched = color_match_lab(image, reference)
+    return torch.clamp(_apply_target(image, matched, target), 0.0, 1.0)
 
 
 class ColorMatchingNode:
@@ -86,6 +110,7 @@ class ColorMatchingNode:
                 "image": ("IMAGE",),
                 "reference": ("IMAGE",),
                 "method": (COLOR_MATCH_METHODS, {"default": "LAB"}),
+                "target": (COLOR_MATCH_TARGETS, {"default": "All"}),
             },
             "optional": {
                 "preview_id": ("STRING", {"default": "A"}),
@@ -97,16 +122,20 @@ class ColorMatchingNode:
     FUNCTION = "run"
     CATEGORY = "image/processing"
 
-    def run(self, image, reference, method="LAB", preview_id: str = "A"):
-        out = apply_color_match(image, reference, method)
+    def run(self, image, reference, method="LAB", target="All", preview_id: str = "A"):
+        out = apply_color_match(image, reference, method, target)
 
         # Save both inputs so the frontend can recompute the match live when the
         # method changes (mirrors the Layer Blending preview pattern).
         this_dir = os.path.dirname(os.path.abspath(__file__))
         web_dir = os.path.join(this_dir, "web")
         safe_id = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in (preview_id or 'A'))
-        _save_web_preview(image, web_dir, filename=f"color_match_src_{safe_id}.png", max_dim=512)
-        _save_web_preview(reference, web_dir, filename=f"color_match_ref_{safe_id}.png", max_dim=512)
+        # Use a larger preview than the other nodes: color matching derives its
+        # transform from per-channel mean/std (or a histogram), and downscaling
+        # smooths the image, which biases those statistics low. A higher-res
+        # preview keeps the in-node result close to the full-res output.
+        _save_web_preview(image, web_dir, filename=f"color_match_src_{safe_id}.png", max_dim=1024)
+        _save_web_preview(reference, web_dir, filename=f"color_match_ref_{safe_id}.png", max_dim=1024)
 
         try:
             from server import PromptServer  # type: ignore

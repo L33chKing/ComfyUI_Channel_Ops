@@ -5,34 +5,76 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 const EXT_NAME = "Layer_Blending.Preview";
 
+// Height (px) of the preview area added below the widgets the first time a
+// preview appears. Shared by all preview nodes for a consistent look.
+const PREVIEW_H = 256;
+
 (function(){
+  // One-time node resize when the first preview becomes available. Fresh nodes
+  // get a sensible preview area; workflow-restored nodes keep their saved size.
+  function seedPreviewSize(node){
+    if(node._previewAutoSized) return;
+    node._previewAutoSized = true;
+    if(node._loadedFromWorkflow) return;
+    try{
+      const min = node.computeSize();
+      const w = Math.max(node.size[0], min[0] || 0);
+      node.setSize([w, (min[1] || 0) + PREVIEW_H]);
+      app.graph.setDirtyCanvas(true, true);
+    }catch(_){ }
+  }
+
   function drawPreview(node, ctx){
     const state = node._layerBlendState;
     if(!state) return;
+    // Nothing rendered yet? Don't draw an empty box.
+    if(!state.outReady) return;
     const w = node.size[0];
     const h = node.size[1];
     const pad = 11;
 
+    function widgetHeight(wg){
+      let wh = 0;
+      try{
+        if(typeof wg.computeSize === 'function'){
+          const sz = wg.computeSize(w);
+          if(Array.isArray(sz)) wh = sz[1] || 0; else if(typeof sz === 'number') wh = sz;
+        } else if(typeof wg.height === 'number'){ wh = wg.height; }
+        else { wh = 20; }
+      }catch(_){ wh = 20; }
+      return wh > 0 ? wh : 0;
+    }
     function widgetsBottomY(n){
-      const start = (n.widgets_start_y ?? n.widgetsStartY ?? 0);
-      let y = start;
+      // Prefer the real drawn positions: LiteGraph sets widget.last_y (node-local)
+      // during widget drawing, which runs immediately before onDrawForeground —
+      // far more reliable than summing heights from a possibly-unset start offset
+      // (which ignored the title bar + input/output slot rows and let the preview
+      // overlap the last widget).
+      let maxBottom = 0;
       if(Array.isArray(n.widgets)){
         for(const wg of n.widgets){
-          if(!wg) continue;
-          let wh = 0;
-          try{
-            if(typeof wg.computeSize === 'function'){
-              const sz = wg.computeSize(w);
-              if(Array.isArray(sz)) wh = sz[1] || 0; else if(typeof sz === 'number') wh = sz;
-            } else if(typeof wg.height === 'number') {
-              wh = wg.height;
-            } else { wh = 24; }
-          }catch(_){ wh = 24; }
-          y += (wh || 0) + 6;
+          if(!wg || wg.hidden) continue;
+          if(typeof wg.last_y !== 'number' || wg.last_y <= 0) continue;
+          const b = wg.last_y + widgetHeight(wg);
+          if(b > maxBottom) maxBottom = b;
         }
       }
-      const minTop = 24;
-      return Math.max(y, minTop + 6);
+      if(maxBottom > 0) return maxBottom;
+      // First-frame fallback (before any widget has been drawn): estimate from
+      // the header height + the taller of the input/output slot columns.
+      const LG = (typeof window !== 'undefined') ? window.LiteGraph : null;
+      const titleH = (LG && LG.NODE_TITLE_HEIGHT) || 30;
+      const slotH = (LG && LG.NODE_SLOT_HEIGHT) || 20;
+      const nIn = (n.inputs && n.inputs.length) || 0;
+      const nOut = (n.outputs && n.outputs.length) || 0;
+      let y = titleH + Math.max(nIn, nOut) * slotH + 4;
+      if(Array.isArray(n.widgets)){
+        for(const wg of n.widgets){
+          if(!wg || wg.hidden) continue;
+          y += widgetHeight(wg) + 4;
+        }
+      }
+      return y;
     }
 
     const safeTop = widgetsBottomY(node) + 18;
@@ -48,14 +90,6 @@ const EXT_NAME = "Layer_Blending.Preview";
     ctx.strokeStyle = "rgba(255,255,255,0.1)";
     ctx.strokeRect(x, y, dw, dh);
 
-    if(!state.outReady){
-      ctx.fillStyle = "#bbb";
-      ctx.font = "11px sans-serif";
-      const msg = "Run node once to seed preview";
-      ctx.fillText(msg, x+12, y+Math.floor(dh/2));
-      ctx.restore();
-      return;
-    }
     const iw = state.outCanvas.width, ih = state.outCanvas.height;
     const scale = Math.min(dw/iw, dh/ih);
     const rw = Math.max(1, Math.floor(iw*scale));
@@ -164,6 +198,8 @@ const EXT_NAME = "Layer_Blending.Preview";
     }
 
     function clamp01(x){ return Math.min(1, Math.max(0, x)); }
+    // Mirrors layer_blending.py's _BLEND_FUNCS: the same modes clamp their
+    // result to [0,1] here as in the backend, so preview == output.
     function blendPixel(a, b, mode){
       // a,b in [0,1]
       switch(mode){
@@ -174,17 +210,18 @@ const EXT_NAME = "Layer_Blending.Preview";
         case 'soft light': return (1 - 2*b)*a*a + 2*b*a;
         case 'darken': return Math.min(a,b);
         case 'lighten': return Math.max(a,b);
-        case 'color dodge': return (a / Math.max(1e-8, 1-b));
-        case 'color burn': return (1 - ((1-a) / Math.max(1e-8, b)));
+        case 'color dodge': return clamp01(a / Math.max(1e-8, 1-b));
+        case 'color burn': return clamp01(1 - ((1-a) / Math.max(1e-8, b)));
         case 'linear burn': return a + b - 1;
-        case 'vivid light': return (b<0.5) ? (1 - ((1-a)/Math.max(1e-8, 2*b))) : (a/Math.max(1e-8, 2*(1-b)));
+        case 'vivid light': return (b<0.5) ? clamp01(1 - ((1-a)/Math.max(1e-8, 2*b))) : clamp01(a/Math.max(1e-8, 2*(1-b)));
         case 'linear light': return a + 2*b - 1;
-        case 'pin light': return (b<0.5) ? Math.min(a, Math.min(1, 2*b)) : Math.max(a, Math.max(0, 2*b-1));
+        case 'pin light': return (b<0.5) ? Math.min(a, clamp01(2*b)) : Math.max(a, clamp01(2*b-1));
         case 'difference': return Math.abs(a-b);
         case 'exclusion': return a + b - 2*a*b;
-        case 'divide': return a / Math.max(1e-8, b);
+        case 'divide': return clamp01(a / Math.max(1e-8, b));
         case 'hard mix': return (a + b < 1) ? 0 : 1;
         case 'linear dodge':
+        case 'linear dodge (add)':
         case 'add': return a + b;
         case 'subtract': return a - b;
         case 'normal':
@@ -193,17 +230,24 @@ const EXT_NAME = "Layer_Blending.Preview";
     }
 
     function render(){
-      const opacity = (parseFloat(getVal('opacity')) || 0) / 255.0;
-  const mode = String(getVal('mode') || 'Normal').toLowerCase();
+      // Opacity defaults to 255 (matches the Python node default) when the
+      // widget value is missing/NaN — not 0, which would blank the blend.
+      const opRaw = parseFloat(getVal('opacity'));
+      const opacity = (isFinite(opRaw) ? opRaw : 255) / 255.0;
+      const mode = String(getVal('mode') || 'Normal').toLowerCase();
       const ready = state.bgReady && state.fgReady;
       state.outReady = false;
       if(!ready){ app.graph.setDirtyCanvas(true,true); return; }
-      const w = Math.max(1, Math.min(state.bgImg.naturalWidth, state.fgImg.naturalWidth));
-      const h = Math.max(1, Math.min(state.bgImg.naturalHeight, state.fgImg.naturalHeight));
+      // Match the backend geometry: background keeps its size, foreground is
+      // resized to the background's H×W (apply_blend does the same). Using the
+      // background size — not min() of both — avoids distorting the result when
+      // the two inputs have different dimensions.
+      const w = Math.max(1, state.bgImg.naturalWidth);
+      const h = Math.max(1, state.bgImg.naturalHeight);
       state.outCanvas.width = w; state.outCanvas.height = h;
       const ctx = state.outCtx;
 
-      // Draw inputs resampled into temp offscreens
+      // Draw inputs resampled into temp offscreens (fg stretched to bg size).
       const cA = document.createElement('canvas'); cA.width=w; cA.height=h; const xA = cA.getContext('2d'); xA.drawImage(state.bgImg, 0,0,w,h);
       const cB = document.createElement('canvas'); cB.width=w; cB.height=h; const xB = cB.getContext('2d'); xB.drawImage(state.fgImg, 0,0,w,h);
       const aData = xA.getImageData(0,0,w,h).data;
@@ -236,6 +280,7 @@ const EXT_NAME = "Layer_Blending.Preview";
       }
       ctx.putImageData(out, 0, 0);
       state.outReady = true;
+      seedPreviewSize(node);
       app.graph.setDirtyCanvas(true,true);
     }
 
@@ -294,6 +339,8 @@ const EXT_NAME = "Layer_Blending.Preview";
       if(nm.includes('LayerBlendingNode')){
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function(){ if(origCreated) try{ origCreated.apply(this, arguments); }catch(_e){} try{ ensureBehavior(this); }catch(_e){} };
+        const origConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function(info){ this._loadedFromWorkflow = true; if(origConfigure) try{ origConfigure.apply(this, arguments); }catch(_e){} };
         const origDraw = nodeType.prototype.onDrawForeground;
         nodeType.prototype.onDrawForeground = function(ctx){ if(origDraw) try{ origDraw.apply(this, arguments); }catch(_e){} try{ if(this._layerBlendPreviewAdded) drawPreview(this, ctx); }catch(_e){} };
       }

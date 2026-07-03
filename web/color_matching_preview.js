@@ -10,7 +10,24 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 const EXT_NAME = "Color_Matching.Preview";
 
+// Height (px) of the preview area added below the widgets the first time a
+// preview appears. Shared by all preview nodes for a consistent look.
+const PREVIEW_H = 256;
+
 (function(){
+  // One-time node resize when the first preview becomes available. Fresh nodes
+  // get a sensible preview area; workflow-restored nodes keep their saved size.
+  function seedPreviewSize(node){
+    if(node._previewAutoSized) return;
+    node._previewAutoSized = true;
+    if(node._loadedFromWorkflow) return;
+    try{
+      const min = node.computeSize();
+      const w = Math.max(node.size[0], min[0] || 0);
+      node.setSize([w, (min[1] || 0) + PREVIEW_H]);
+      app.graph.setDirtyCanvas(true, true);
+    }catch(_){ }
+  }
   // ---------- Oklab plane conversions (match channel_ops.py) ----------
   function srgbToLinear(c){ return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
   function linearToSrgb(c){ return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(Math.max(0, c), 1.0 / 2.4) - 0.055; }
@@ -87,30 +104,54 @@ const EXT_NAME = "Color_Matching.Preview";
   function drawPreview(node, ctx){
     const state = node._colorMatchState;
     if(!state) return;
+    // Nothing rendered yet? Don't draw an empty box.
+    if(!state.outReady) return;
     const w = node.size[0];
     const h = node.size[1];
     const pad = 11;
 
+    function widgetHeight(wg){
+      let wh = 0;
+      try{
+        if(typeof wg.computeSize === 'function'){
+          const sz = wg.computeSize(w);
+          if(Array.isArray(sz)) wh = sz[1] || 0; else if(typeof sz === 'number') wh = sz;
+        } else if(typeof wg.height === 'number'){ wh = wg.height; }
+        else { wh = 20; }
+      }catch(_){ wh = 20; }
+      return wh > 0 ? wh : 0;
+    }
     function widgetsBottomY(n){
-      const start = (n.widgets_start_y ?? n.widgetsStartY ?? 0);
-      let y = start;
+      // Prefer the real drawn positions: LiteGraph sets widget.last_y (node-local)
+      // during widget drawing, which runs immediately before onDrawForeground —
+      // far more reliable than summing heights from a possibly-unset start offset
+      // (which ignored the title bar + input/output slot rows and let the preview
+      // overlap the last widget).
+      let maxBottom = 0;
       if(Array.isArray(n.widgets)){
         for(const wg of n.widgets){
-          if(!wg) continue;
-          let wh = 0;
-          try{
-            if(typeof wg.computeSize === 'function'){
-              const sz = wg.computeSize(w);
-              if(Array.isArray(sz)) wh = sz[1] || 0; else if(typeof sz === 'number') wh = sz;
-            } else if(typeof wg.height === 'number') {
-              wh = wg.height;
-            } else { wh = 24; }
-          }catch(_){ wh = 24; }
-          y += (wh || 0) + 6;
+          if(!wg || wg.hidden) continue;
+          if(typeof wg.last_y !== 'number' || wg.last_y <= 0) continue;
+          const b = wg.last_y + widgetHeight(wg);
+          if(b > maxBottom) maxBottom = b;
         }
       }
-      const minTop = 24;
-      return Math.max(y, minTop + 6);
+      if(maxBottom > 0) return maxBottom;
+      // First-frame fallback (before any widget has been drawn): estimate from
+      // the header height + the taller of the input/output slot columns.
+      const LG = (typeof window !== 'undefined') ? window.LiteGraph : null;
+      const titleH = (LG && LG.NODE_TITLE_HEIGHT) || 30;
+      const slotH = (LG && LG.NODE_SLOT_HEIGHT) || 20;
+      const nIn = (n.inputs && n.inputs.length) || 0;
+      const nOut = (n.outputs && n.outputs.length) || 0;
+      let y = titleH + Math.max(nIn, nOut) * slotH + 4;
+      if(Array.isArray(n.widgets)){
+        for(const wg of n.widgets){
+          if(!wg || wg.hidden) continue;
+          y += widgetHeight(wg) + 4;
+        }
+      }
+      return y;
     }
 
     const safeTop = widgetsBottomY(node) + 18;
@@ -126,14 +167,6 @@ const EXT_NAME = "Color_Matching.Preview";
     ctx.strokeStyle = "rgba(255,255,255,0.1)";
     ctx.strokeRect(x, y, dw, dh);
 
-    if(!state.outReady){
-      ctx.fillStyle = "#bbb";
-      ctx.font = "11px sans-serif";
-      const msg = "Run node once to seed preview";
-      ctx.fillText(msg, x+12, y+Math.floor(dh/2));
-      ctx.restore();
-      return;
-    }
     const iw = state.outCanvas.width, ih = state.outCanvas.height;
     const scale = Math.min(dw/iw, dh/ih);
     const rw = Math.max(1, Math.floor(iw*scale));
@@ -296,6 +329,21 @@ const EXT_NAME = "Color_Matching.Preview";
         oklabToRgbPlanes(wL, wA, wBl, oR, oG, oB);
       }
 
+      // Keep only the requested Oklab component of the matched result, filling
+      // the rest from the original (matches _apply_target in color_matching.py).
+      const target = String(getVal('target') || 'All').toLowerCase();
+      if(target !== 'all'){
+        const oL = new Float32Array(n), oA = new Float32Array(n), oBl = new Float32Array(n);
+        const mL = new Float32Array(n), mA = new Float32Array(n), mBl = new Float32Array(n);
+        rgbToOklabPlanes(src.R, src.G, src.B, oL, oA, oBl);  // original
+        rgbToOklabPlanes(oR, oG, oB, mL, mA, mBl);           // matched
+        if(target === 'lightness'){
+          oklabToRgbPlanes(mL, oA, oBl, oR, oG, oB);         // matched L, original a,b
+        } else { // color
+          oklabToRgbPlanes(oL, mA, mBl, oR, oG, oB);         // original L, matched a,b
+        }
+      }
+
       state.outCanvas.width = w; state.outCanvas.height = h;
       const out = state.outCtx.createImageData(w, h);
       const od = out.data;
@@ -307,6 +355,7 @@ const EXT_NAME = "Color_Matching.Preview";
       }
       state.outCtx.putImageData(out, 0, 0);
       state.outReady = true;
+      seedPreviewSize(node);
       app.graph.setDirtyCanvas(true,true);
     }
 
@@ -326,6 +375,13 @@ const EXT_NAME = "Color_Matching.Preview";
         'LAB — mean/std transfer in perceptual Oklab space (recommended).',
         'RGB — mean/std transfer directly in RGB.',
         'Histogram — per-channel cumulative-distribution matching.',
+      ].join('\n'); }
+      const wTarget = getWidget('target');
+      if(wTarget){ wTarget.tooltip = wTarget.description = [
+        'Which part of the match to keep (rest stays from the original, split in Oklab):',
+        'All — full color match.',
+        'Lightness — match the reference tonality, keep original colors.',
+        'Color — match the reference grade, keep original tonality.',
       ].join('\n'); }
     }
 
@@ -368,6 +424,8 @@ const EXT_NAME = "Color_Matching.Preview";
       if(nm.includes('ColorMatchingNode')){
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function(){ if(origCreated) try{ origCreated.apply(this, arguments); }catch(_e){} try{ ensureBehavior(this); }catch(_e){} };
+        const origConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function(info){ this._loadedFromWorkflow = true; if(origConfigure) try{ origConfigure.apply(this, arguments); }catch(_e){} };
         const origDraw = nodeType.prototype.onDrawForeground;
         nodeType.prototype.onDrawForeground = function(ctx){ if(origDraw) try{ origDraw.apply(this, arguments); }catch(_e){} try{ if(this._colorMatchPreviewAdded) drawPreview(this, ctx); }catch(_e){} };
       }

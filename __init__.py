@@ -17,9 +17,9 @@ NODE_CLASS_MAPPINGS: Dict[str, Any] = {
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     "ChannelOpsNode": "Channel Ops (live-preview)",
-    "LayerBlendingNode": "Layer Blending (live-preview)",
+    "LayerBlendingNode": "Layer Blending Ops (live-preview)",
     "ImageEffectsNode": "Filter Ops (live-preview)",
-    "ColorMatchingNode": "Color Matching (live-preview)",
+    "ColorMatchingNode": "Color Matching Ops (live-preview)",
 }
 
 __all__ = [
